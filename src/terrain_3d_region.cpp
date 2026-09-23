@@ -370,31 +370,6 @@ Dictionary Terrain3DRegion::get_data() const {
 	return dict;
 }
 
-Ref<Terrain3DRegion> Terrain3DRegion::duplicate(const bool p_deep) {
-	Ref<Terrain3DRegion> region;
-	region.instantiate();
-	if (!p_deep) {
-		region->set_data(get_data());
-	} else {
-		Dictionary dict;
-		// Native type copies
-		dict["version"] = _version;
-		dict["region_size"] = _region_size;
-		dict["vertex_spacing"] = _vertex_spacing;
-		dict["height_range"] = _height_range;
-		dict["modified"] = _modified;
-		dict["deleted"] = _deleted;
-		dict["location"] = _location;
-		// Resource duplicates
-		dict["height_map"] = _height_map->duplicate();
-		dict["control_map"] = _control_map->duplicate();
-		dict["color_map"] = _color_map->duplicate();
-		dict["instances"] = _instances.duplicate(true);
-		region->set_data(dict);
-	}
-	return region;
-}
-
 void Terrain3DRegion::dump(const bool verbose) const {
 	LOG(MESG, "Region: ", _location, ", version: ", vformat("%.2f", _version), ", size: ", _region_size,
 			", spacing: ", vformat("%.1f", _vertex_spacing), ", range: ", vformat("%.2v", _height_range),
@@ -482,7 +457,6 @@ void Terrain3DRegion::_bind_methods() {
 
 	ClassDB::bind_method(D_METHOD("set_data", "data"), &Terrain3DRegion::set_data);
 	ClassDB::bind_method(D_METHOD("get_data"), &Terrain3DRegion::get_data);
-	ClassDB::bind_method(D_METHOD("duplicate", "deep"), &Terrain3DRegion::duplicate, DEFVAL(false));
 	ClassDB::bind_method(D_METHOD("dump", "verbose"), &Terrain3DRegion::dump, DEFVAL(false));
 
 	int ro_flags = PROPERTY_USAGE_STORAGE | PROPERTY_USAGE_EDITOR | PROPERTY_USAGE_READ_ONLY;
