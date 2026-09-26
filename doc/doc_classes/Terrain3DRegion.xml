@@ -35,6 +35,13 @@
 				- deep - Also make complete duplicates of the maps and multimeshes.
 			</description>
 		</method>
+		<method name="rotated" qualifiers="const">
+			<return type="Terrain3DRegion" />
+			<param index="0" name="quarter_turns" type="int" />
+			<description>
+				Returns a deep copy rotated clockwise by 0, 90, 180, or 270 degrees when viewed from above. Pass 0 through 3. Rotates all maps, texture angles, and painted mesh transforms, including their instance colors and cell assignments. Returns null for an invalid turn count or malformed region data. The source is unchanged.
+			</description>
+		</method>
 		<method name="get_data" qualifiers="const">
 			<return type="Dictionary" />
 			<description>

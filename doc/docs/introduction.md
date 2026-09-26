@@ -39,6 +39,34 @@ There is currently a limit of 1024 regions or 32 x 32. So the maximum dimensions
 
 Region files are stored in the data directory as individual files, with their location coordinates in the filename. e.g. terrain3d_01-02.res, which represents region (+01, -02).
 
+### Copying regions between terrains
+
+You can assemble a new terrain from regions in other initialized Terrain3D nodes. Configure every terrain with the same region size and vertex spacing, and use the same texture and mesh assets at the same IDs. Use matching material settings if the chunks should have the same appearance. Then copy one region at a time:
+
+```gdscript
+var err := destination.data.copy_region_from(source, Vector2i.ZERO, Vector2i(1, 0), 1)
+if err != OK:
+    push_error("Could not copy region: %s" % error_string(err))
+```
+
+The fourth argument is the number of clockwise quarter turns (0 to 3). The source region is not modified. The destination location must be empty and within the 32 by 32 region grid (coordinates -16 through 15). For several copies, pass `false` as the fifth argument, then call `destination.data.update_maps()` and `destination.instancer.update_mmis()` once after the final copy. A destination with a data directory can save the new regions through its normal save process.
+
+The copy includes height, texture and color painting, holes, navigation painting, and painted mesh instances with their collision. It does not copy scene nodes such as spawn points or triggers. Place those separately and bake navigation after assembling the terrain.
+
+After placing all chunks, you can stitch adjacent edges in the destination:
+
+```gdscript
+var result: Dictionary = destination.data.stitch_region_seams(8, true, transition_texture_id, 4.0)
+if result.error != OK:
+    push_error("Could not stitch regions: %s" % error_string(result.error))
+for edge in result.steep_edges:
+    push_warning("Steep join %s to %s: %.2f height units" % [edge.from, edge.to, edge.max_height_delta])
+```
+
+The strip width is in terrain pixels on **each** side of a join and must be between 1 and half the region size. Height and color values ease toward a shared edge value; the optional transition texture fades in toward the join. Pass `-1` for its ID to keep existing texture painting. Texture IDs are discrete, so the transition uses a texture asset already assigned to that ID on the destination rather than averaging IDs. The operation refreshes terrain collision; save the destination if the stitched maps should persist. Calling it again blends the current maps again. Bake navigation after stitching. Very different edges can still make a steep slope: inspect the reported joins and author chunks with compatible edge profiles when arbitrary pairings need to look natural. This only changes terrain maps; painted mesh positions and scene nodes are not repositioned.
+
+Rotation uses the terrain's sampled vertex grid as its pivot so painted meshes stay aligned with painted terrain. Instances in the last vertex-spacing strip can cross that pivot; their centers are kept inside the destination region's bounds. Check objects painted directly against a chunk's outer edges after rotation.
+
 The region grid is visible if `View Gizmos` is enabled in the Godot `Perspective` menu. Or if `Terrain3D / Regions / Show Grid` is enabled.
 
 

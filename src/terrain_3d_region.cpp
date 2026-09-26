@@ -2,10 +2,66 @@
 
 #include <godot_cpp/classes/resource_saver.hpp>
 
+#include <cmath>
+#include <cstring>
+
 #include "logger.h"
 #include "terrain_3d_data.h"
 #include "terrain_3d_region.h"
 #include "terrain_3d_util.h"
+
+namespace {
+// The control map stores uint32 bit fields in FORMAT_RF. Rotating through
+// Image::get_pixel/set_pixel would reinterpret those bits as floats.
+Ref<Image> rotate_region_image(const Ref<Image> &p_image, const int p_turns, const bool p_control) {
+	const int size = p_image->get_width();
+	PackedByteArray source = p_image->get_data();
+	PackedByteArray result;
+	result.resize(size * size * 4);
+	const uint8_t *src = source.ptr();
+	uint8_t *dst = result.ptrw();
+	for (int z = 0; z < size; ++z) {
+		for (int x = 0; x < size; ++x) {
+			int rx = x;
+			int rz = z;
+			for (int turn = 0; turn < p_turns; ++turn) {
+				const int next_x = size - 1 - rz;
+				rz = rx;
+				rx = next_x;
+			}
+			const int from = (z * size + x) * 4;
+			const int to = (rz * size + rx) * 4;
+			if (p_control) {
+				uint32_t bits;
+				std::memcpy(&bits, src + from, sizeof(bits));
+				bits = (bits & ~(0xFu << 10)) | enc_uv_rotation((get_uv_rotation(bits) + 4 * p_turns) & 0xF);
+				std::memcpy(dst + to, &bits, sizeof(bits));
+			} else {
+				std::memcpy(dst + to, src + from, 4);
+			}
+		}
+	}
+	Ref<Image> image = Image::create_from_data(size, size, false, p_image->get_format(), result);
+	if (p_image->has_mipmaps()) {
+		image->generate_mipmaps();
+	}
+	return image;
+}
+
+Vector3 rotate_region_position(const Vector3 &p_position, const int p_turns, const real_t p_sample_max,
+		const real_t p_region_width) {
+	Vector3 result = p_position;
+	for (int turn = 0; turn < p_turns; ++turn) {
+		result = Vector3(p_sample_max - result.z, result.y, result.x);
+	}
+	// Map pixels cover 0..(size-1)*spacing, while the region footprint is
+	// 0..size*spacing. Keep instances in the outer strip in this region.
+	const real_t last = std::nextafter(p_region_width, real_t(0));
+	result.x = CLAMP(result.x, real_t(0), last);
+	result.z = CLAMP(result.z, real_t(0), last);
+	return result;
+}
+} // namespace
 
 /////////////////////
 // Public Functions
@@ -395,6 +451,76 @@ Ref<Terrain3DRegion> Terrain3DRegion::duplicate(const bool p_deep) {
 	return region;
 }
 
+Ref<Terrain3DRegion> Terrain3DRegion::rotated(const int p_quarter_turns) const {
+	if (p_quarter_turns < 0 || p_quarter_turns > 3) {
+		LOG(ERROR, "quarter_turns must be between 0 and 3");
+		return Ref<Terrain3DRegion>();
+	}
+	if (_height_map.is_null() || _control_map.is_null() || _color_map.is_null() || !is_valid_region_size(_region_size)) {
+		LOG(ERROR, "Cannot rotate an uninitialized region");
+		return Ref<Terrain3DRegion>();
+	}
+	Ref<Terrain3DRegion> region = const_cast<Terrain3DRegion *>(this)->duplicate(true);
+	if (p_quarter_turns == 0) {
+		region->set_modified(true);
+		return region;
+	}
+	region->set_height_map(rotate_region_image(_height_map, p_quarter_turns, false));
+	region->set_control_map(rotate_region_image(_control_map, p_quarter_turns, true));
+	region->set_color_map(rotate_region_image(_color_map, p_quarter_turns, false));
+
+	Dictionary rotated_instances;
+	const real_t width = _region_size * _vertex_spacing;
+	const real_t sample_max = (_region_size - 1) * _vertex_spacing;
+	const Basis quarter_turn(Vector3(0, 0, 1), Vector3(0, 1, 0), Vector3(-1, 0, 0));
+	Basis rotation;
+	for (int turn = 0; turn < p_quarter_turns; ++turn) {
+		rotation = quarter_turn * rotation;
+	}
+	for (const Variant &mesh_key : _instances.keys()) {
+		Dictionary old_cells = _instances[mesh_key];
+		Dictionary new_cells;
+		for (const Variant &cell_key : old_cells.keys()) {
+			Array triple = old_cells[cell_key];
+			if (triple.size() != 3) {
+				LOG(ERROR, "Malformed instance cell in region ", _location);
+				return Ref<Terrain3DRegion>();
+			}
+			TypedArray<Transform3D> transforms = triple[0];
+			PackedColorArray colors = triple[1];
+			if (transforms.size() != colors.size()) {
+				LOG(ERROR, "Instance colors and transforms differ in region ", _location);
+				return Ref<Terrain3DRegion>();
+			}
+			for (int i = 0; i < transforms.size(); ++i) {
+				Transform3D transform = transforms[i];
+				transform.origin = rotate_region_position(transform.origin, p_quarter_turns, sample_max, width);
+				transform.basis = rotation * transform.basis;
+				Vector2i cell(UtilityFunctions::floori(transform.origin.x / _vertex_spacing) / 32,
+						UtilityFunctions::floori(transform.origin.z / _vertex_spacing) / 32);
+				Array new_triple = new_cells.get(cell, Array());
+				if (new_triple.is_empty()) {
+					new_triple.resize(3);
+					new_triple[0] = TypedArray<Transform3D>();
+					new_triple[1] = PackedColorArray();
+					new_triple[2] = true;
+				}
+				TypedArray<Transform3D> new_transforms = new_triple[0];
+				PackedColorArray new_colors = new_triple[1];
+				new_transforms.push_back(transform);
+				new_colors.push_back(colors[i]);
+				new_triple[0] = new_transforms;
+				new_triple[1] = new_colors;
+				new_cells[cell] = new_triple;
+			}
+		}
+		rotated_instances[mesh_key] = new_cells;
+	}
+	region->set_instances(rotated_instances);
+	region->set_modified(true);
+	return region;
+}
+
 void Terrain3DRegion::dump(const bool verbose) const {
 	LOG(MESG, "Region: ", _location, ", version: ", vformat("%.2f", _version), ", size: ", _region_size,
 			", spacing: ", vformat("%.1f", _vertex_spacing), ", range: ", vformat("%.2v", _height_range),
@@ -483,6 +609,7 @@ void Terrain3DRegion::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_data", "data"), &Terrain3DRegion::set_data);
 	ClassDB::bind_method(D_METHOD("get_data"), &Terrain3DRegion::get_data);
 	ClassDB::bind_method(D_METHOD("duplicate", "deep"), &Terrain3DRegion::duplicate, DEFVAL(false));
+	ClassDB::bind_method(D_METHOD("rotated", "quarter_turns"), &Terrain3DRegion::rotated);
 	ClassDB::bind_method(D_METHOD("dump", "verbose"), &Terrain3DRegion::dump, DEFVAL(false));
 
 	int ro_flags = PROPERTY_USAGE_STORAGE | PROPERTY_USAGE_EDITOR | PROPERTY_USAGE_READ_ONLY;

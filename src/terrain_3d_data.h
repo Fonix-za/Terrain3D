@@ -122,6 +122,10 @@ public:
 	Ref<Terrain3DRegion> add_region_blankp(const Vector3 &p_global_position, const bool p_update = true);
 	Ref<Terrain3DRegion> add_region_blank(const Vector2i &p_region_loc, const bool p_update = true);
 	Error add_region(const Ref<Terrain3DRegion> &p_region, const bool p_update = true);
+	Error copy_region_from(Terrain3D *p_source, const Vector2i &p_source_location, const Vector2i &p_destination_location,
+			const int p_quarter_turns = 0, const bool p_update = true);
+	Dictionary stitch_region_seams(const int p_blend_width = 8, const bool p_blend_colors = true,
+			const int p_transition_texture_id = -1, const real_t p_warning_height_delta = 4.0);
 	void remove_regionp(const Vector3 &p_global_position, const bool p_update = true);
 	void remove_regionl(const Vector2i &p_region_loc, const bool p_update = true);
 	void remove_region(const Ref<Terrain3DRegion> &p_region, const bool p_update = true);

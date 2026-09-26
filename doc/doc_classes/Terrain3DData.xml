@@ -19,6 +19,27 @@
 				- update - regenerates the texture arrays if true. Set to false if bulk adding many regions, then true on the last one or use [method update_maps].
 			</description>
 		</method>
+		<method name="copy_region_from">
+			<return type="int" enum="Error" />
+			<param index="0" name="source" type="Terrain3D" />
+			<param index="1" name="source_location" type="Vector2i" />
+			<param index="2" name="destination_location" type="Vector2i" />
+			<param index="3" name="quarter_turns" type="int" default="0" />
+			<param index="4" name="update" type="bool" default="true" />
+			<description>
+				Copies one active region from another Terrain3D, rotates it clockwise in 90-degree steps, and adds it at destination_location. The source remains unchanged. Source and destination must have the same region size, vertex spacing, and matching texture and mesh assets at every used ID. An occupied destination or mismatched data returns an error without adding a region. Set update to false when adding many regions, then call update_maps() and Terrain3DInstancer.update_mmis() on the destination when finished.
+			</description>
+		</method>
+		<method name="stitch_region_seams">
+			<return type="Dictionary" />
+			<param index="0" name="blend_width" type="int" default="8" />
+			<param index="1" name="blend_colors" type="bool" default="true" />
+			<param index="2" name="transition_texture_id" type="int" default="-1" />
+			<param index="3" name="warning_height_delta" type="float" default="4.0" />
+			<description>
+				Optionally blend the shared edges of all adjacent active regions after assembling them. blend_width is the number of pixels on each side (1 to half the region size). Heights and, optionally, colors ease to their shared edge average. A valid transition_texture_id paints that discrete texture toward each join; -1 leaves texture painting untouched. Existing control-map texture IDs are never numerically averaged. The return Dictionary contains error (Error), stitched_edges (int), and steep_edges (Array of Dictionaries with from, to, and max_height_delta). A join is flagged when its height gap exceeds warning_height_delta, in terrain height units. The maps and terrain collision are refreshed on success. This modifies destination regions, so stitch only after all copies are placed and before saving or baking navigation. Repeating this call blends the current result again.
+			</description>
+		</method>
 		<method name="add_region_blank">
 			<return type="Terrain3DRegion" />
 			<param index="0" name="region_location" type="Vector2i" />

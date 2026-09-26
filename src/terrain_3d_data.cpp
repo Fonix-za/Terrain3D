@@ -7,7 +7,12 @@
 #include <godot_cpp/classes/file_access.hpp>
 #include <godot_cpp/classes/resource_saver.hpp>
 
+#include <cmath>
+#include <cstring>
+#include <vector>
+
 #include "logger.h"
+#include "terrain_3d.h"
 #include "terrain_3d_data.h"
 
 ///////////////////////////
@@ -301,6 +306,238 @@ Error Terrain3DData::add_region(const Ref<Terrain3DRegion> &p_region, const bool
 		_terrain->get_instancer()->update_mmis(-1, V2I_MAX, true);
 	}
 	return OK;
+}
+
+Error Terrain3DData::copy_region_from(Terrain3D *p_source, const Vector2i &p_source_location,
+		const Vector2i &p_destination_location, const int p_quarter_turns, const bool p_update) {
+	if (!p_source || !p_source->get_data() || !_terrain || !_terrain->get_assets().is_valid() ||
+			!p_source->get_assets().is_valid() || p_quarter_turns < 0 || p_quarter_turns > 3) {
+		return ERR_INVALID_PARAMETER;
+	}
+	Terrain3DData *source_data = p_source->get_data();
+	if (!source_data->has_region(p_source_location) || get_region_map_index(p_destination_location) < 0) {
+		return ERR_INVALID_PARAMETER;
+	}
+	if (has_region(p_destination_location)) {
+		return ERR_ALREADY_EXISTS;
+	}
+	Ref<Terrain3DRegion> source_region = source_data->get_region(p_source_location);
+	if (source_region.is_null() || source_region->get_region_size() != _terrain->get_region_size() ||
+			p_source->get_region_size() != _terrain->get_region_size() ||
+			!Math::is_equal_approx(source_region->get_vertex_spacing(), _terrain->get_vertex_spacing()) ||
+			!Math::is_equal_approx(p_source->get_vertex_spacing(), _terrain->get_vertex_spacing())) {
+		return ERR_INVALID_DATA;
+	}
+	Ref<Terrain3DAssets> source_assets = p_source->get_assets();
+	Ref<Terrain3DAssets> destination_assets = _terrain->get_assets();
+	const bool shared_assets = source_assets == destination_assets ||
+			(!source_assets->get_path().is_empty() && source_assets->get_path() == destination_assets->get_path());
+	auto same_texture = [&](int id) {
+		Ref<Terrain3DTextureAsset> a = source_assets->get_texture_asset(id);
+		Ref<Terrain3DTextureAsset> b = destination_assets->get_texture_asset(id);
+		if (a.is_null() || b.is_null()) {
+			return shared_assets && a.is_null() && b.is_null();
+		}
+		return a.is_valid() && b.is_valid() &&
+				(a == b || (!a->get_path().is_empty() && a->get_path() == b->get_path()));
+	};
+	auto same_mesh = [&](int id) {
+		Ref<Terrain3DMeshAsset> a = source_assets->get_mesh_asset(id);
+		Ref<Terrain3DMeshAsset> b = destination_assets->get_mesh_asset(id);
+		return a.is_valid() && b.is_valid() &&
+				(a == b || (!a->get_path().is_empty() && a->get_path() == b->get_path()));
+	};
+	for (const Variant &mesh_key : source_region->get_instances().keys()) {
+		if (mesh_key.get_type() != Variant::INT || !same_mesh(int(mesh_key))) {
+			return ERR_INVALID_DATA;
+		}
+	}
+	Ref<Image> control = source_region->get_control_map();
+	if (control.is_null() || control->get_format() != Image::FORMAT_RF) {
+		return ERR_INVALID_DATA;
+	}
+	PackedByteArray control_bytes = control->get_data();
+	const uint8_t *bytes = control_bytes.ptr();
+	const int pixel_count = source_region->get_region_size() * source_region->get_region_size();
+	if (control_bytes.size() < pixel_count * 4) {
+		return ERR_INVALID_DATA;
+	}
+	bool checked_textures[Terrain3DAssets::MAX_TEXTURES] = {};
+	for (int i = 0; i < pixel_count; ++i) {
+		uint32_t bits;
+		std::memcpy(&bits, bytes + i * 4, sizeof(bits));
+		const int ids[2] = { get_base(bits), get_overlay(bits) };
+		for (int id : ids) {
+			if (!checked_textures[id]) {
+				if (!same_texture(id)) {
+					return ERR_INVALID_DATA;
+				}
+				checked_textures[id] = true;
+			}
+		}
+	}
+	Ref<Terrain3DRegion> copy = source_region->rotated(p_quarter_turns);
+	if (copy.is_null()) {
+		return ERR_INVALID_DATA;
+	}
+	copy->set_location(p_destination_location);
+	copy->set_modified(true);
+	return add_region(copy, p_update);
+}
+
+Dictionary Terrain3DData::stitch_region_seams(const int p_blend_width, const bool p_blend_colors,
+		const int p_transition_texture_id, const real_t p_warning_height_delta) {
+	Dictionary result;
+	result["error"] = OK;
+	result["stitched_edges"] = 0;
+	result["steep_edges"] = Array();
+	if (!_terrain || p_blend_width < 1 || p_blend_width > _region_size / 2 ||
+			p_warning_height_delta < 0 || !std::isfinite(p_warning_height_delta) ||
+			p_transition_texture_id < -1 || p_transition_texture_id >= Terrain3DAssets::MAX_TEXTURES ||
+			(p_transition_texture_id >= 0 && (!_terrain->get_assets().is_valid() ||
+			_terrain->get_assets()->get_texture_asset(p_transition_texture_id).is_null()))) {
+		result["error"] = ERR_INVALID_PARAMETER;
+		return result;
+	}
+
+	struct Work {
+		Vector2i location;
+		Ref<Terrain3DRegion> region;
+		Ref<Image> height;
+		Ref<Image> color;
+		PackedByteArray control;
+		bool touched = false;
+	};
+	std::vector<Work> work;
+	Dictionary indices;
+	Dictionary needed;
+	for (const Vector2i &location : _region_locations) {
+		for (const Vector2i &offset : { Vector2i(1, 0), Vector2i(0, 1) }) {
+			Vector2i neighbor = location + offset;
+			if (_region_locations.has(neighbor)) {
+				needed[location] = true;
+				needed[neighbor] = true;
+			}
+		}
+	}
+	if (needed.is_empty()) {
+		return result;
+	}
+	for (const Vector2i &location : _region_locations) {
+		if (!needed.has(location)) {
+			continue;
+		}
+		Ref<Terrain3DRegion> region = get_region(location);
+		if (region.is_null() || region->is_deleted()) {
+			continue;
+		}
+		Ref<Image> height = region->get_height_map();
+		Ref<Image> color = region->get_color_map();
+		Ref<Image> control = region->get_control_map();
+		if (height.is_null() || height->get_width() != _region_size || height->get_height() != _region_size ||
+				(p_blend_colors && (color.is_null() || color->get_width() != _region_size || color->get_height() != _region_size)) ||
+				(p_transition_texture_id >= 0 && (control.is_null() || control->get_format() != Image::FORMAT_RF ||
+				control->get_width() != _region_size || control->get_height() != _region_size))) {
+			result["error"] = ERR_INVALID_DATA;
+			return result;
+		}
+		Work item;
+		item.location = location;
+		item.region = region;
+		item.height = height->duplicate();
+		if (p_blend_colors) {
+			item.color = color->duplicate();
+		}
+		if (p_transition_texture_id >= 0) {
+			item.control = control->get_data();
+		}
+		indices[location] = int(work.size());
+		work.push_back(item);
+	}
+
+	// Process X joins before Z joins. Both sides receive the same edge sample, including at four-region corners.
+	Array steep_edges;
+	int stitched_edges = 0;
+	for (int axis = 0; axis < 2; ++axis) {
+		for (Work &a : work) {
+			Vector2i neighbor = a.location + (axis == 0 ? Vector2i(1, 0) : Vector2i(0, 1));
+			if (!indices.has(neighbor)) {
+				continue;
+			}
+			Work &b = work[int(indices[neighbor])];
+			a.touched = true;
+			b.touched = true;
+			real_t max_delta = 0;
+			for (int along = 0; along < _region_size; ++along) {
+				const int ax = axis == 0 ? _region_size - 1 : along;
+				const int ay = axis == 0 ? along : _region_size - 1;
+				const int bx = axis == 0 ? 0 : along;
+				const int by = axis == 0 ? along : 0;
+				max_delta = MAX(max_delta, real_t(Math::abs(a.region->get_height_map()->get_pixel(ax, ay).r -
+						b.region->get_height_map()->get_pixel(bx, by).r)));
+				const float common_height = (a.height->get_pixel(ax, ay).r + b.height->get_pixel(bx, by).r) * 0.5f;
+				const Color common_color = p_blend_colors ?
+						(a.color->get_pixel(ax, ay) + b.color->get_pixel(bx, by)) * 0.5f : Color();
+				for (int distance = 0; distance < p_blend_width; ++distance) {
+					const float t = p_blend_width == 1 ? 1.f : 1.f - float(distance) / float(p_blend_width - 1);
+					const float weight = t * t * (3.f - 2.f * t);
+					const int xa = axis == 0 ? _region_size - 1 - distance : along;
+					const int ya = axis == 0 ? along : _region_size - 1 - distance;
+					const int xb = axis == 0 ? distance : along;
+					const int yb = axis == 0 ? along : distance;
+					a.height->set_pixel(xa, ya, Color(Math::lerp(a.height->get_pixel(xa, ya).r, common_height, weight), 0, 0));
+					b.height->set_pixel(xb, yb, Color(Math::lerp(b.height->get_pixel(xb, yb).r, common_height, weight), 0, 0));
+					if (p_blend_colors) {
+						a.color->set_pixel(xa, ya, a.color->get_pixel(xa, ya).lerp(common_color, weight));
+						b.color->set_pixel(xb, yb, b.color->get_pixel(xb, yb).lerp(common_color, weight));
+					}
+					if (p_transition_texture_id >= 0 && weight > 0.f) {
+						auto paint_transition = [&](Work &item, int x, int y) {
+						uint8_t *bytes = item.control.ptrw();
+						const int offset = (y * _region_size + x) * 4;
+						uint32_t bits;
+						std::memcpy(&bits, bytes + offset, sizeof(bits));
+						const int dominant = get_blend(bits) >= 128 ? get_overlay(bits) : get_base(bits);
+						// Preserve hole, navigation, and reserved bits; disable autoshader in the painted strip.
+						bits = (bits & 0x7e) | enc_base(dominant) | enc_overlay(p_transition_texture_id) |
+								enc_blend(uint8_t(Math::round(255.f * weight)));
+						std::memcpy(bytes + offset, &bits, sizeof(bits));
+					};
+					paint_transition(a, xa, ya);
+					paint_transition(b, xb, yb);
+					}
+				}
+			}
+			if (max_delta > p_warning_height_delta) {
+				Dictionary warning;
+				warning["from"] = a.location;
+				warning["to"] = b.location;
+				warning["max_height_delta"] = max_delta;
+				steep_edges.push_back(warning);
+			}
+			++stitched_edges;
+		}
+	}
+	for (Work &item : work) {
+		if (!item.touched) {
+			continue;
+		}
+		item.region->set_height_map(item.height);
+		if (p_blend_colors) {
+			item.region->set_color_map(item.color);
+		}
+		if (p_transition_texture_id >= 0) {
+			item.region->set_control_map(Image::create_from_data(_region_size, _region_size, false, Image::FORMAT_RF, item.control));
+		}
+		item.region->set_modified(true);
+	}
+	if (stitched_edges > 0) {
+		update_maps(TYPE_MAX, true, p_blend_colors);
+		_terrain->get_collision()->update(V2I_MAX, true);
+	}
+	result["stitched_edges"] = stitched_edges;
+	result["steep_edges"] = steep_edges;
+	return result;
 }
 
 void Terrain3DData::remove_regionp(const Vector3 &p_global_position, const bool p_update) {
@@ -1386,6 +1623,10 @@ void Terrain3DData::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("add_region_blankp", "global_position", "update"), &Terrain3DData::add_region_blankp, DEFVAL(true));
 	ClassDB::bind_method(D_METHOD("add_region_blank", "region_location", "update"), &Terrain3DData::add_region_blank, DEFVAL(true));
 	ClassDB::bind_method(D_METHOD("add_region", "region", "update"), &Terrain3DData::add_region, DEFVAL(true));
+	ClassDB::bind_method(D_METHOD("copy_region_from", "source", "source_location", "destination_location", "quarter_turns", "update"),
+			&Terrain3DData::copy_region_from, DEFVAL(0), DEFVAL(true));
+	ClassDB::bind_method(D_METHOD("stitch_region_seams", "blend_width", "blend_colors", "transition_texture_id", "warning_height_delta"),
+			&Terrain3DData::stitch_region_seams, DEFVAL(8), DEFVAL(true), DEFVAL(-1), DEFVAL(4.0));
 	ClassDB::bind_method(D_METHOD("remove_regionp", "global_position", "update"), &Terrain3DData::remove_regionp, DEFVAL(true));
 	ClassDB::bind_method(D_METHOD("remove_regionl", "region_location", "update"), &Terrain3DData::remove_regionl, DEFVAL(true));
 	ClassDB::bind_method(D_METHOD("remove_region", "region", "update"), &Terrain3DData::remove_region, DEFVAL(true));
