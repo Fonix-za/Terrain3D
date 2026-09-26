@@ -6,9 +6,12 @@
 #include <godot_cpp/classes/array_mesh.hpp>
 #include <godot_cpp/classes/material.hpp>
 #include <godot_cpp/classes/packed_scene.hpp>
+#include <godot_cpp/classes/physics_material.hpp>
 #include <godot_cpp/classes/rendering_server.hpp>
 #include <godot_cpp/classes/resource.hpp>
+#include <godot_cpp/classes/shape3d.hpp>
 #include <godot_cpp/classes/texture2d.hpp>
+#include <vector>
 
 #include "constants.h"
 #include "terrain_3d_asset_resource.h"
@@ -41,6 +44,19 @@ class Terrain3DMeshAsset : public Terrain3DAssetResource {
 	CLASS_NAME();
 
 public:
+	struct CollisionShapeSource {
+		Ref<Shape3D> shape;
+		Transform3D transform;
+	};
+
+	struct CollisionBodySource {
+		std::vector<CollisionShapeSource> shapes;
+		uint32_t layer = 1;
+		uint32_t mask = 1;
+		real_t priority = 1.f;
+		Ref<PhysicsMaterial> material;
+	};
+
 	enum GenType {
 		TYPE_NONE,
 		TYPE_TEXTURE_CARD,
@@ -54,6 +70,7 @@ private:
 	// Saved data
 	bool _enabled = true;
 	Ref<PackedScene> _packed_scene;
+	bool _copy_collision_shapes = true;
 	GenType _generated_type = TYPE_NONE;
 	int _generated_faces = 2;
 	Vector2 _generated_size = V2(1.f);
@@ -73,6 +90,7 @@ private:
 	Ref<Material> _highlight_mat;
 	TypedArray<Mesh> _meshes;
 	TypedArray<Mesh> _pending_meshes; // Queue to avoid warnings from RS on mesh swap
+	std::vector<CollisionBodySource> _collision_bodies;
 	uint32_t _instance_count = 0;
 
 	void _clear_lod_ranges();
@@ -107,6 +125,9 @@ public:
 
 	void set_scene_file(const Ref<PackedScene> &p_scene_file);
 	Ref<PackedScene> get_scene_file() const { return _packed_scene; }
+	void set_copy_collision_shapes(const bool p_enabled);
+	bool get_copy_collision_shapes() const { return _copy_collision_shapes; }
+	const std::vector<CollisionBodySource> &get_collision_bodies() const { return _collision_bodies; }
 	bool is_scene_file_pending() const { return _pending_meshes.size() > 0; }
 	void commit_meshes();
 	void set_generated_type(const GenType p_type);

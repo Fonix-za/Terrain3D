@@ -101,16 +101,16 @@ A MultiMesh renders all instances in one draw call and does not cull individual 
 We mitigate this by generating multiple MultiMeshes. Each region is divided into 32x32m cells so that these MultiMeshes can be culled by frustum or occlusion. We expose visibility ranges in each mesh asset settings so they can be culled by distance as well.
 
 
-### No Collision
+### Scene Collision
 
-Multimeshes are generated and rendered on the GPU. The physics engine is on the CPU, and doesn't know anything about the placed instances. For now use this only for instances where collision is unnecessary like grass.
+Scene file mesh assets can copy collision from `StaticBody3D` nodes in the scene. Leave **Copy Collision Shapes** enabled on the `Terrain3DMeshAsset` to create a physics shape for every painted instance from each enabled `CollisionShape3D` under those bodies. The source bodies' collision layers, masks, priority, and physics materials are preserved. Disabling the checkbox removes collision from existing instances while keeping their meshes and placements; enabling it again restores collision.
 
-In the future, instance collision will be generated using the collision shapes stored in your scene file. See [PR 699](https://github.com/TokisanGames/Terrain3D/pull/699).
+Collision is built for all painted instances in both the editor and game, including instances loaded from saved regions. This uses CPU physics resources for every instance and shape, so use it for objects that need collision rather than dense grass. Generated texture cards and scenes without usable static collision shapes remain collision-free.
 
 
 ### No Scene Transforms
 
-Currently, the instancer uses the first Mesh resource it finds in the scene file and uses it as is. It ignores all transforms in the file, as they are not stored in the Mesh resource.
+Currently, the instancer uses the first Mesh resource it finds in the scene file and uses it as is. It ignores mesh node transforms, as they are not stored in the Mesh resource. Copied collision does use the scene's transforms, so transformed mesh nodes may cause the visible mesh and collision to be misaligned.
 
 If you've built and imported your object with a non-zero transform, and have used the position, rotation, or scale in the scene file to fix your placement, then your instanced objects are going to have strange transforms. e.g. Your tree might be laying flat or be extremely large or small.
 
@@ -234,4 +234,3 @@ You can find a sample script that will import data from SimpleGrassTextured in `
 The instance transforms are now stored in your region files.
 
 This script also serves as an example to learn how to use the API for procedural placement. Though this script uses add_multimesh(), you could manually iterate through the SGT multimesh, pull out the transforms, modify them, then send them to the instancer with add_transforms().
-

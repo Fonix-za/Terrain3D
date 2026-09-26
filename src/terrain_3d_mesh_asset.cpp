@@ -1,16 +1,34 @@
 // Copyright © 2023-2026 Cory Petkovsek, Roope Palmroos, and Contributors.
 
+#include <godot_cpp/classes/collision_shape3d.hpp>
 #include <godot_cpp/classes/editor_interface.hpp>
 #include <godot_cpp/classes/editor_paths.hpp>
 #include <godot_cpp/classes/file_access.hpp>
 #include <godot_cpp/classes/image_texture.hpp>
 #include <godot_cpp/classes/material.hpp>
+#include <godot_cpp/classes/node3d.hpp>
 #include <godot_cpp/classes/project_settings.hpp>
 #include <godot_cpp/classes/quad_mesh.hpp>
+#include <godot_cpp/classes/static_body3d.hpp>
 #include <godot_cpp/classes/standard_material3d.hpp>
+#include <utility>
 
 #include "logger.h"
 #include "terrain_3d_mesh_asset.h"
+
+namespace {
+// Build the authored transform even though the PackedScene is outside a tree.
+Transform3D get_scene_transform(Node *p_node) {
+	Transform3D transform;
+	for (Node *node = p_node; node; node = node->get_parent()) {
+		Node3D *node_3d = Object::cast_to<Node3D>(node);
+		if (node_3d) {
+			transform = node_3d->get_transform() * transform;
+		}
+	}
+	return transform;
+}
+} // namespace
 
 ///////////////////////////
 // Private Functions
@@ -99,6 +117,7 @@ Ref<ArrayMesh> Terrain3DMeshAsset::_create_generated_mesh(const GenType p_type) 
 void Terrain3DMeshAsset::_assign_generated_mesh() {
 	LOG(DEBUG, "Assiging generated mesh & lod settings");
 	_packed_scene.unref();
+	_collision_bodies.clear();
 	_pending_meshes.clear();
 	_pending_meshes.push_back(_create_generated_mesh());
 	_last_lod = 0;
@@ -155,8 +174,10 @@ void Terrain3DMeshAsset::clear() {
 	_highlighted = false;
 	_highlight_mat = Ref<Material>();
 	_packed_scene.unref();
+	_copy_collision_shapes = true;
 	_meshes.clear();
 	_pending_meshes.clear();
+	_collision_bodies.clear();
 	_generated_type = TYPE_NONE;
 	_generated_faces = 2;
 	_generated_size = V2(1.f);
@@ -244,6 +265,7 @@ void Terrain3DMeshAsset::set_instance_count(const uint32_t p_amount) {
 void Terrain3DMeshAsset::set_scene_file(const Ref<PackedScene> &p_scene_file) {
 	SET_IF_DIFF(_packed_scene, p_scene_file);
 	_pending_meshes.clear();
+	_collision_bodies.clear();
 	if (_packed_scene.is_valid()) {
 		Node *node = _packed_scene->instantiate();
 		if (!node) {
@@ -260,6 +282,40 @@ void Terrain3DMeshAsset::set_scene_file(const Ref<PackedScene> &p_scene_file) {
 
 		// Look for MeshInstance3D nodes
 		LOG(DEBUG, "Loaded scene with parent node: ", node);
+		TypedArray<Node> static_bodies = node->find_children("*", "StaticBody3D", true, false);
+		if (node->is_class("StaticBody3D")) {
+			static_bodies.push_back(node);
+		}
+		for (int body_index = 0; body_index < static_bodies.size(); body_index++) {
+			StaticBody3D *body = Object::cast_to<StaticBody3D>(static_bodies[body_index]);
+			if (!body) {
+				continue;
+			}
+			CollisionBodySource source;
+			source.layer = body->get_collision_layer();
+			source.mask = body->get_collision_mask();
+			source.priority = body->get_collision_priority();
+			source.material = body->get_physics_material_override();
+			TypedArray<Node> shape_nodes = body->find_children("*", "CollisionShape3D", true, false);
+			for (int shape_index = 0; shape_index < shape_nodes.size(); shape_index++) {
+				CollisionShape3D *collision_shape = Object::cast_to<CollisionShape3D>(shape_nodes[shape_index]);
+				if (!collision_shape || collision_shape->is_disabled() || collision_shape->get_shape().is_null()) {
+					continue;
+				}
+				// A nested StaticBody3D owns its own shapes.
+				Node *parent = collision_shape->get_parent();
+				while (parent && parent != body && !parent->is_class("StaticBody3D")) {
+					parent = parent->get_parent();
+				}
+				if (parent != body) {
+					continue;
+				}
+				source.shapes.push_back({ collision_shape->get_shape(), get_scene_transform(collision_shape) });
+			}
+			if (!source.shapes.empty()) {
+				_collision_bodies.push_back(std::move(source));
+			}
+		}
 		TypedArray<Node> mesh_instances;
 
 		// First look for XXXXLOD# meshes, sorted by last digit
@@ -335,6 +391,12 @@ void Terrain3DMeshAsset::set_scene_file(const Ref<PackedScene> &p_scene_file) {
 		commit_meshes();
 	}
 	notify_property_list_changed(); // Call _validate_property to update inspector
+	LOG(DEBUG, "Emitting instancer_setting_changed, ID: ", _id);
+	emit_signal("instancer_setting_changed", _id);
+}
+
+void Terrain3DMeshAsset::set_copy_collision_shapes(const bool p_enabled) {
+	SET_IF_DIFF(_copy_collision_shapes, p_enabled);
 	LOG(DEBUG, "Emitting instancer_setting_changed, ID: ", _id);
 	emit_signal("instancer_setting_changed", _id);
 }
@@ -607,6 +669,8 @@ void Terrain3DMeshAsset::_bind_methods() {
 
 	ClassDB::bind_method(D_METHOD("set_scene_file", "scene_file"), &Terrain3DMeshAsset::set_scene_file);
 	ClassDB::bind_method(D_METHOD("get_scene_file"), &Terrain3DMeshAsset::get_scene_file);
+	ClassDB::bind_method(D_METHOD("set_copy_collision_shapes", "enabled"), &Terrain3DMeshAsset::set_copy_collision_shapes);
+	ClassDB::bind_method(D_METHOD("get_copy_collision_shapes"), &Terrain3DMeshAsset::get_copy_collision_shapes);
 	ClassDB::bind_method(D_METHOD("set_generated_type", "type"), &Terrain3DMeshAsset::set_generated_type);
 	ClassDB::bind_method(D_METHOD("get_generated_type"), &Terrain3DMeshAsset::get_generated_type);
 	ClassDB::bind_method(D_METHOD("get_mesh", "lod"), &Terrain3DMeshAsset::get_mesh, DEFVAL(0));
@@ -667,6 +731,7 @@ void Terrain3DMeshAsset::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "id", PROPERTY_HINT_NONE), "set_id", "get_id");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "enabled", PROPERTY_HINT_NONE), "set_enabled", "is_enabled");
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "scene_file", PROPERTY_HINT_RESOURCE_TYPE, "PackedScene"), "set_scene_file", "get_scene_file");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "copy_collision_shapes", PROPERTY_HINT_NONE), "set_copy_collision_shapes", "get_copy_collision_shapes");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "generated_type", PROPERTY_HINT_ENUM, "None,Texture Card", PROPERTY_USAGE_STORAGE), "set_generated_type", "get_generated_type");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "height_offset", PROPERTY_HINT_RANGE, "-20.0,20.0,.005"), "set_height_offset", "get_height_offset");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "density", PROPERTY_HINT_RANGE, ".01,10.0,.005"), "set_density", "get_density");

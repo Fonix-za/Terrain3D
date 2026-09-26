@@ -1,5 +1,6 @@
 // Copyright © 2023-2026 Cory Petkovsek, Roope Palmroos, and Contributors.
 
+#include <godot_cpp/classes/physics_server3d.hpp>
 #include <godot_cpp/classes/resource_saver.hpp>
 #include <godot_cpp/classes/world3d.hpp>
 
@@ -51,6 +52,8 @@ void Terrain3DInstancer::_process_updates() {
 				auto pair = std::make_pair(region_loc, mesh_id);
 				if (region->get_instances().has(mesh_id)) {
 					_update_mmi_by_region(region, mesh_id);
+				} else {
+					_destroy_mmi_by_location(region_loc, mesh_id);
 				}
 			}
 		}
@@ -96,6 +99,7 @@ void Terrain3DInstancer::_process_updates() {
 			continue;
 		}
 		if (!region->get_instances().has(mesh_id)) {
+			_destroy_mmi_by_location(region_loc, mesh_id);
 			continue;
 		}
 		_update_mmi_by_region(region, mesh_id);
@@ -115,6 +119,9 @@ void Terrain3DInstancer::_update_mmi_by_region(const Terrain3DRegion *p_region, 
 	}
 	Vector2i region_loc = p_region->get_location();
 	Dictionary mesh_inst_dict = p_region->get_instances();
+	// A scene or checkbox change may replace all shapes without modifying the
+	// saved transforms. Rebuild this mesh's physics from those transforms.
+	_destroy_collision_by_location(region_loc, p_mesh_id);
 
 	// Verify mesh id is valid, enabled, and has MeshInstance3Ds
 	Ref<Terrain3DMeshAsset> ma = _terrain->get_assets()->get_mesh_asset(p_mesh_id);
@@ -154,6 +161,7 @@ void Terrain3DInstancer::_update_mmi_by_region(const Terrain3DRegion *p_region, 
 			_destroy_mmi_by_cell(region_loc, p_mesh_id, cell);
 			continue;
 		}
+		_update_collision_by_cell(p_region, p_mesh_id, cell, xforms, ma);
 		// Clean MMIs f/ LODs not used
 		for (int lod = 0; lod < Terrain3DMeshAsset::MAX_LOD_COUNT; lod++) {
 			if (lod > ma->get_last_lod() || (ma->get_cast_shadows() == SHADOWS_ONLY && (lod > ma->get_last_shadow_lod() || lod < ma->get_shadow_impostor()))) {
@@ -298,6 +306,103 @@ void Terrain3DInstancer::_update_mmi_by_region(const Terrain3DRegion *p_region, 
 	}
 }
 
+void Terrain3DInstancer::_update_collision_by_cell(const Terrain3DRegion *p_region, const int p_mesh_id,
+		const Vector2i &p_cell, const TypedArray<Transform3D> &p_xforms, const Ref<Terrain3DMeshAsset> &p_asset) {
+	if (!p_asset->get_copy_collision_shapes() || p_asset->get_scene_file().is_null() || p_asset->get_collision_bodies().empty()) {
+		return;
+	}
+	const Vector2i region_loc = p_region->get_location();
+	const real_t region_width = p_region->get_region_size() * _terrain->get_vertex_spacing();
+	const Transform3D region_transform(Basis(), Vector3(region_loc.x * region_width, 0.f, region_loc.y * region_width));
+	CollisionCell &collision_cell = _collision_rids[region_loc][p_mesh_id][p_cell];
+	for (const auto &source_body : p_asset->get_collision_bodies()) {
+		RID body = PS->body_create();
+		PS->body_set_mode(body, PhysicsServer3D::BODY_MODE_STATIC);
+		PS->body_set_space(body, _terrain->get_world_3d()->get_space());
+		PS->body_attach_object_instance_id(body, _terrain->get_instance_id());
+		PS->body_set_collision_layer(body, source_body.layer);
+		PS->body_set_collision_mask(body, source_body.mask);
+		PS->body_set_collision_priority(body, source_body.priority);
+		if (source_body.material.is_valid()) {
+			const Ref<PhysicsMaterial> &material = source_body.material;
+			PS->body_set_param(body, PhysicsServer3D::BODY_PARAM_BOUNCE,
+					material->get_bounce() * (material->is_absorbent() ? -1.f : 1.f));
+			PS->body_set_param(body, PhysicsServer3D::BODY_PARAM_FRICTION,
+					material->get_friction() * (material->is_rough() ? -1.f : 1.f));
+		} else {
+			PS->body_set_param(body, PhysicsServer3D::BODY_PARAM_BOUNCE, 0.f);
+			PS->body_set_param(body, PhysicsServer3D::BODY_PARAM_FRICTION, 1.f);
+		}
+		for (const auto &source_shape : source_body.shapes) {
+			collision_cell.shapes.push_back(source_shape.shape);
+		}
+		for (const Transform3D &instance_transform : p_xforms) {
+			for (const auto &source_shape : source_body.shapes) {
+				PS->body_add_shape(body, source_shape.shape->get_rid(), region_transform * instance_transform * source_shape.transform);
+			}
+		}
+		collision_cell.bodies.push_back(body);
+	}
+}
+
+void Terrain3DInstancer::_destroy_collision_by_cell(const Vector2i &p_region_loc, const int p_mesh_id, const Vector2i &p_cell) {
+	auto region_it = _collision_rids.find(p_region_loc);
+	if (region_it == _collision_rids.end()) {
+		return;
+	}
+	auto mesh_it = region_it->second.find(p_mesh_id);
+	if (mesh_it == region_it->second.end()) {
+		return;
+	}
+	auto cell_it = mesh_it->second.find(p_cell);
+	if (cell_it == mesh_it->second.end()) {
+		return;
+	}
+	for (RID body : cell_it->second.bodies) {
+		PS->free_rid(body);
+	}
+	mesh_it->second.erase(cell_it);
+	if (mesh_it->second.empty()) {
+		region_it->second.erase(mesh_it);
+	}
+	if (region_it->second.empty()) {
+		_collision_rids.erase(region_it);
+	}
+}
+
+void Terrain3DInstancer::_destroy_collision_by_location(const Vector2i &p_region_loc, const int p_mesh_id) {
+	auto region_it = _collision_rids.find(p_region_loc);
+	if (region_it == _collision_rids.end()) {
+		return;
+	}
+	auto mesh_it = region_it->second.find(p_mesh_id);
+	if (mesh_it == region_it->second.end()) {
+		return;
+	}
+	for (const auto &cell_entry : mesh_it->second) {
+		for (RID body : cell_entry.second.bodies) {
+			PS->free_rid(body);
+		}
+	}
+	region_it->second.erase(mesh_it);
+	if (region_it->second.empty()) {
+		_collision_rids.erase(region_it);
+	}
+}
+
+void Terrain3DInstancer::_destroy_all_collision() {
+	for (const auto &region_entry : _collision_rids) {
+		for (const auto &mesh_entry : region_entry.second) {
+			for (const auto &cell_entry : mesh_entry.second) {
+				for (RID body : cell_entry.second.bodies) {
+					PS->free_rid(body);
+				}
+			}
+		}
+	}
+	_collision_rids.clear();
+}
+
 void Terrain3DInstancer::_set_mmi_lod_ranges(RID p_mmi, const Ref<Terrain3DMeshAsset> &p_ma, const int p_lod) {
 	if (!p_mmi || p_ma.is_null()) {
 		return;
@@ -384,6 +489,7 @@ void Terrain3DInstancer::_destroy_mmi_by_mesh(const int p_mesh_id) {
 
 void Terrain3DInstancer::_destroy_mmi_by_location(const Vector2i &p_region_loc, const int p_mesh_id) {
 	LOG(DEBUG, "Deleting all MMIs in region: ", p_region_loc, " for mesh_id: ", p_mesh_id);
+	_destroy_collision_by_location(p_region_loc, p_mesh_id);
 	// Identify cells with matching mesh_id
 	std::unordered_set<Vector2i, Vector2iHash> cells;
 	if (_mmi_rids.count(p_region_loc) > 0) {
@@ -410,6 +516,9 @@ void Terrain3DInstancer::_destroy_mmi_by_location(const Vector2i &p_region_loc, 
 }
 
 void Terrain3DInstancer::_destroy_mmi_by_cell(const Vector2i &p_region_loc, const int p_mesh_id, const Vector2i p_cell, const int p_lod) {
+	if (p_lod == INT32_MAX) {
+		_destroy_collision_by_cell(p_region_loc, p_mesh_id, p_cell);
+	}
 	if (_mmi_rids.count(p_region_loc) == 0) {
 		return;
 	}
@@ -570,6 +679,7 @@ void Terrain3DInstancer::initialize(Terrain3D *p_terrain) {
 void Terrain3DInstancer::destroy() {
 	IS_DATA_INIT(VOID);
 	_queued_updates.clear();
+	_destroy_all_collision();
 	LOG(INFO, "Destroying all MMIs");
 	int mesh_count = _terrain->get_assets()->get_mesh_count();
 	for (int m = 0; m < mesh_count; m++) {

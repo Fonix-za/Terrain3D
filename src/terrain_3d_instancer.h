@@ -7,6 +7,7 @@
 #include <godot_cpp/classes/multi_mesh_instance3d.hpp>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 #include "constants.h"
 #include "terrain_3d_region.h"
@@ -41,6 +42,16 @@ private:
 	using MeshMMIDict = std::unordered_map<Vector2i, CellMMIDict, Vector2iHash>;
 	std::unordered_map<Vector2i, MeshMMIDict, Vector2iHash> _mmi_rids;
 
+	// Physics bodies are grouped by region, mesh, and cell. Each cell has one
+	// StaticBody RID per source StaticBody3D, with a shape for every instance.
+	struct CollisionCell {
+		std::vector<RID> bodies;
+		std::vector<Ref<Shape3D>> shapes; // Keep resources alive while their RIDs are in use.
+	};
+	using CellCollisionDict = std::unordered_map<Vector2i, CollisionCell, Vector2iHash>;
+	using MeshCollisionDict = std::unordered_map<int, CellCollisionDict>;
+	std::unordered_map<Vector2i, MeshCollisionDict, Vector2iHash> _collision_rids;
+
 	// MMI Updates tracked in a unique Set of <region_location, mesh_id>
 	// <V2I_MAX, -2> means destroy first, then update everything
 	// <V2I_MAX, -1> means update everything
@@ -61,6 +72,11 @@ private:
 	void _destroy_mmi_by_mesh(const int p_mesh_id);
 	void _destroy_mmi_by_location(const Vector2i &p_region_loc, const int p_mesh_id);
 	void _destroy_mmi_by_cell(const Vector2i &p_region_loc, const int p_mesh_id, const Vector2i p_cell, const int p_lod = INT32_MAX);
+	void _update_collision_by_cell(const Terrain3DRegion *p_region, const int p_mesh_id, const Vector2i &p_cell,
+			const TypedArray<Transform3D> &p_xforms, const Ref<Terrain3DMeshAsset> &p_asset);
+	void _destroy_collision_by_cell(const Vector2i &p_region_loc, const int p_mesh_id, const Vector2i &p_cell);
+	void _destroy_collision_by_location(const Vector2i &p_region_loc, const int p_mesh_id);
+	void _destroy_all_collision();
 	void _backup_region(const Ref<Terrain3DRegion> &p_region);
 	RID _create_multimesh(const int p_mesh_id, const int p_lod, const TypedArray<Transform3D> &p_xforms = TypedArray<Transform3D>(), const PackedColorArray &p_colors = PackedColorArray()) const;
 	Vector2i _get_cell(const Vector3 &p_global_position, const int p_region_size) const;
