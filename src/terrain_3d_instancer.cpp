@@ -1,6 +1,10 @@
 // Copyright © 2023-2026 Cory Petkovsek, Roope Palmroos, and Contributors.
 
+#include <godot_cpp/classes/array_mesh.hpp>
 #include <godot_cpp/classes/physics_server3d.hpp>
+#include <godot_cpp/classes/navigation_mesh.hpp>
+#include <godot_cpp/classes/navigation_mesh_source_geometry_data3d.hpp>
+#include <godot_cpp/classes/navigation_server3d.hpp>
 #include <godot_cpp/classes/resource_saver.hpp>
 #include <godot_cpp/classes/world3d.hpp>
 
@@ -403,6 +407,64 @@ void Terrain3DInstancer::_destroy_all_collision() {
 	_collision_rids.clear();
 }
 
+void Terrain3DInstancer::_parse_navigation_geometry(const Ref<NavigationMesh> &p_navigation_mesh,
+		const Ref<NavigationMeshSourceGeometryData3D> &p_source_geometry, Node *p_node) {
+	if (p_node != _terrain || p_navigation_mesh.is_null() || p_source_geometry.is_null() || !_terrain->is_inside_tree() || _mode == DISABLED) {
+		return;
+	}
+	NavigationMesh::ParsedGeometryType parsed_type = p_navigation_mesh->get_parsed_geometry_type();
+	if (parsed_type != NavigationMesh::PARSED_GEOMETRY_STATIC_COLLIDERS && parsed_type != NavigationMesh::PARSED_GEOMETRY_BOTH) {
+		return;
+	}
+	const uint32_t collision_mask = p_navigation_mesh->get_collision_mask();
+	const TypedArray<Vector2i> region_locations = _terrain->get_data()->get_region_locations();
+	for (const Vector2i &region_loc : region_locations) {
+		const Terrain3DRegion *region = _terrain->get_data()->get_region_ptr(region_loc);
+		if (!region) {
+			continue;
+		}
+		const Dictionary mesh_instances = region->get_instances();
+		const Transform3D region_transform(Basis(), Vector3(region_loc.x * region->get_region_size() * _terrain->get_vertex_spacing(),
+				0.f, region_loc.y * region->get_region_size() * _terrain->get_vertex_spacing()));
+		for (const Variant &mesh_key : mesh_instances.keys()) {
+			const int mesh_id = mesh_key;
+			if (mesh_id < 0 || mesh_id >= _terrain->get_assets()->get_mesh_count()) {
+				continue;
+			}
+			const Ref<Terrain3DMeshAsset> asset = _terrain->get_assets()->get_mesh_asset(mesh_id);
+			if (asset.is_null() || !asset->is_enabled() || !asset->get_copy_collision_shapes() || asset->get_scene_file().is_null()) {
+				continue;
+			}
+			const Dictionary cells = mesh_instances[mesh_id];
+			for (const Variant &cell_key : cells.keys()) {
+				const Array triple = cells[cell_key];
+				if (triple.is_empty()) {
+					continue;
+				}
+				const TypedArray<Transform3D> transforms = triple[0];
+				for (const auto &source_body : asset->get_collision_bodies()) {
+					if ((source_body.layer & collision_mask) == 0) {
+						continue;
+					}
+					for (const auto &source_shape : source_body.shapes) {
+						const Ref<ArrayMesh> debug_mesh = source_shape.shape->get_debug_mesh();
+						if (debug_mesh.is_null()) {
+							continue;
+						}
+						const PackedVector3Array faces = debug_mesh->get_faces();
+						if (faces.is_empty()) {
+							continue;
+						}
+						for (const Transform3D &instance_transform : transforms) {
+							p_source_geometry->add_faces(faces, region_transform * instance_transform * source_shape.transform);
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
 void Terrain3DInstancer::_set_mmi_lod_ranges(RID p_mmi, const Ref<Terrain3DMeshAsset> &p_ma, const int p_lod) {
 	if (!p_mmi || p_ma.is_null()) {
 		return;
@@ -673,7 +735,20 @@ void Terrain3DInstancer::initialize(Terrain3D *p_terrain) {
 	}
 	IS_DATA_INIT_MESG("Terrain3D not initialized yet", VOID);
 	LOG(INFO, "Initializing Instancer");
+	if (!_navigation_parser.is_valid()) {
+		NavigationServer3D *navigation_server = NavigationServer3D::get_singleton();
+		_navigation_parser = navigation_server->source_geometry_parser_create();
+		navigation_server->source_geometry_parser_set_callback(_navigation_parser,
+				callable_mp(this, &Terrain3DInstancer::_parse_navigation_geometry));
+	}
 	update_mmis();
+}
+
+Terrain3DInstancer::~Terrain3DInstancer() {
+	if (_navigation_parser.is_valid() && NavigationServer3D::get_singleton()) {
+		NavigationServer3D::get_singleton()->free_rid(_navigation_parser);
+	}
+	destroy();
 }
 
 void Terrain3DInstancer::destroy() {

@@ -5,6 +5,8 @@
 
 #include <godot_cpp/classes/multi_mesh.hpp>
 #include <godot_cpp/classes/multi_mesh_instance3d.hpp>
+#include <godot_cpp/classes/navigation_mesh.hpp>
+#include <godot_cpp/classes/navigation_mesh_source_geometry_data3d.hpp>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -51,6 +53,7 @@ private:
 	using CellCollisionDict = std::unordered_map<Vector2i, CollisionCell, Vector2iHash>;
 	using MeshCollisionDict = std::unordered_map<int, CellCollisionDict>;
 	std::unordered_map<Vector2i, MeshCollisionDict, Vector2iHash> _collision_rids;
+	RID _navigation_parser;
 
 	// MMI Updates tracked in a unique Set of <region_location, mesh_id>
 	// <V2I_MAX, -2> means destroy first, then update everything
@@ -77,6 +80,8 @@ private:
 	void _destroy_collision_by_cell(const Vector2i &p_region_loc, const int p_mesh_id, const Vector2i &p_cell);
 	void _destroy_collision_by_location(const Vector2i &p_region_loc, const int p_mesh_id);
 	void _destroy_all_collision();
+	void _parse_navigation_geometry(const Ref<NavigationMesh> &p_navigation_mesh,
+			const Ref<NavigationMeshSourceGeometryData3D> &p_source_geometry, Node *p_node);
 	void _backup_region(const Ref<Terrain3DRegion> &p_region);
 	RID _create_multimesh(const int p_mesh_id, const int p_lod, const TypedArray<Transform3D> &p_xforms = TypedArray<Transform3D>(), const PackedColorArray &p_colors = PackedColorArray()) const;
 	Vector2i _get_cell(const Vector3 &p_global_position, const int p_region_size) const;
@@ -84,7 +89,7 @@ private:
 
 public:
 	Terrain3DInstancer() {}
-	~Terrain3DInstancer() { destroy(); }
+	~Terrain3DInstancer();
 
 	void initialize(Terrain3D *p_terrain);
 	void destroy();

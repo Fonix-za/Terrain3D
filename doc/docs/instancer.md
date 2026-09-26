@@ -107,6 +107,8 @@ Scene file mesh assets can copy collision from `StaticBody3D` nodes in the scene
 
 Collision is built for all painted instances in both the editor and game, including instances loaded from saved regions. This uses CPU physics resources for every instance and shape, so use it for objects that need collision rather than dense grass. Generated texture cards and scenes without usable static collision shapes remain collision-free.
 
+Painted collision uses PhysicsServer bodies, so it does not appear as `StaticBody3D` children in the scene tree. When Godot parses static colliders for a navigation mesh bake, Terrain3D supplies the enabled painted shapes as source geometry. The navigation mesh's collision mask must include the source bodies' collision layers, and its source geometry scope must include the Terrain3D node. Rebake the navigation mesh after painting, erasing, or changing source collision. A saved navigation mesh is not updated automatically when painted instances change.
+
 
 ### No Scene Transforms
 
